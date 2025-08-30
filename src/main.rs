@@ -1,16 +1,17 @@
-// Fixed Iced GUI - Compact layout with custom fonts
+// Advanced Image Resizer with Simple/Advanced modes
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use iced::widget::{button, column, container, progress_bar, row, scrollable, text, text_input, checkbox, Space};
+mod compression;
+mod simple;
+
+use compression::{CompressionAlgorithm, CompressionOptions, SmartCompressor};
+use iced::widget::{button, column, container, pick_list, progress_bar, row, scrollable, text, text_input, checkbox, slider, Space, radio};
 use iced::{executor, Application, Command, Element, Length, Settings, Theme, Font};
 use iced::font::{Family, Weight};
-use image::{DynamicImage, ImageFormat};
 use std::fs;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-// Custom fonts
 const HEADING_FONT: Font = Font {
     family: Family::SansSerif,
     weight: Weight::Bold,
@@ -25,11 +26,23 @@ const BODY_FONT: Font = Font {
     monospaced: false,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompressionMode {
+    Simple,
+    Advanced,
+}
+
+impl Default for CompressionMode {
+    fn default() -> Self {
+        Self::Simple
+    }
+}
+
 pub fn main() -> iced::Result {
     ImageResizer::run(Settings {
         window: iced::window::Settings {
-            size: (480, 550),
-            min_size: Some((400, 500)),
+            size: (520, 650),
+            min_size: Some((500, 600)),
             resizable: true,
             decorations: true,
             ..Default::default()
@@ -47,6 +60,11 @@ struct ImageResizer {
     width: String,
     height: String,
     maintain_ratio: bool,
+    compression_mode: CompressionMode,
+    compression_algorithm: CompressionAlgorithm,
+    quality_slider: u8,
+    optimize_for_web: bool,
+    auto_scale: bool,  // ADD THIS LINE	
     is_processing: bool,
     progress: f32,
     status_message: String,
@@ -62,6 +80,11 @@ enum Message {
     WidthChanged(String),
     HeightChanged(String),
     MaintainRatioToggled(bool),
+    ModeChanged(CompressionMode),
+    AlgorithmSelected(CompressionAlgorithm),
+    QualityChanged(u8),
+    OptimizeForWebToggled(bool),
+    AutoScaleToggled(bool),  // ADD THIS LINE	
     Process,
     ProcessingComplete(Vec<ProcessResult>),
     OpenOutputFolder,
@@ -69,12 +92,14 @@ enum Message {
 }
 
 #[derive(Debug, Clone)]
-struct ProcessResult {
-    filename: String,
-    original_size: u64,
-    new_size: u64,
-    success: bool,
-    message: String,
+pub struct ProcessResult {
+    pub filename: String,
+    pub original_size: u64,
+    pub new_size: u64,
+    pub success: bool,
+    pub message: String,
+    pub algorithm_used: CompressionAlgorithm,
+    pub compression_ratio: f32,
 }
 
 impl Application for ImageResizer {
@@ -84,11 +109,13 @@ impl Application for ImageResizer {
     type Flags = ();
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
-        (Self::default(), Command::none())
+        let mut app = Self::default();
+        app.quality_slider = 85; // Default quality
+        (app, Command::none())
     }
 
     fn title(&self) -> String {
-        String::from("Image Resizer")
+        String::from("Advanced Image Resizer")
     }
 
     fn update(&mut self, message: Message) -> Command<Message> {
@@ -99,6 +126,9 @@ impl Application for ImageResizer {
             Message::SelectFolder => {
                 return Command::perform(select_folder(), Message::FileSelected);
             }
+			Message::AutoScaleToggled(value) => {
+				self.auto_scale = value;
+			}			
             Message::FileSelected(path) => {
                 self.selected_path = path;
             }
@@ -114,23 +144,84 @@ impl Application for ImageResizer {
             Message::MaintainRatioToggled(value) => {
                 self.maintain_ratio = value;
             }
-            Message::Process => {
-                if let Some(path) = &self.selected_path {
-                    self.is_processing = true;
-                    self.progress = 0.0;
-                    self.results.clear();
-                    
-                    let path = path.clone();
-                    let target_size = self.target_size.parse::<u64>().ok();
-                    let dimensions = parse_dimensions(&self.width, &self.height);
-                    let maintain_ratio = self.maintain_ratio;
-                    
-                    return Command::perform(
-                        process_images(path, target_size, dimensions, maintain_ratio),
-                        Message::ProcessingComplete
-                    );
+            Message::ModeChanged(mode) => {
+                self.compression_mode = mode;
+                // Reset to sensible defaults when switching modes
+                if mode == CompressionMode::Simple {
+                    self.compression_algorithm = CompressionAlgorithm::Simple;
+                    self.quality_slider = 85;
                 }
             }
+            Message::AlgorithmSelected(algorithm) => {
+                self.compression_algorithm = algorithm;
+                // Update quality slider based on algorithm
+                if algorithm.supports_quality() {
+                    self.quality_slider = algorithm.recommended_quality();
+                }
+            }
+            Message::QualityChanged(quality) => {
+                self.quality_slider = quality;
+            }
+            Message::OptimizeForWebToggled(value) => {
+                self.optimize_for_web = value;
+            }
+			Message::Process => {
+				if let Some(path) = &self.selected_path {
+					self.is_processing = true;
+					self.progress = 0.0;
+					self.results.clear();
+					
+					let path = path.clone();
+					let target_size = self.target_size.parse::<u64>().ok();
+					let dimensions = parse_dimensions(&self.width, &self.height);
+					let maintain_ratio = self.maintain_ratio;
+					let algorithm = self.compression_algorithm;
+					let quality = self.quality_slider;
+					let optimize_for_web = self.optimize_for_web;
+					let auto_scale = self.auto_scale;  // ADD THIS LINE
+		
+					// Check if we should use simple processing
+					if algorithm == CompressionAlgorithm::Simple {
+						return Command::perform(
+							simple::process_images(
+								path,
+								target_size,
+								dimensions,
+								maintain_ratio,
+								auto_scale,  // ADD THIS PARAMETER
+							),
+							|results| Message::ProcessingComplete(
+								results.into_iter().map(|r| ProcessResult {
+									filename: r.filename,
+									original_size: r.original_size,
+									new_size: r.new_size,
+									success: r.success,
+									message: r.message,
+									algorithm_used: CompressionAlgorithm::Simple,
+									compression_ratio: if r.original_size > 0 {
+										r.new_size as f32 / r.original_size as f32
+									} else {
+										0.0
+									},
+								}).collect()
+							)
+						);
+					} else {
+						return Command::perform(
+							process_images_advanced(
+								path,
+								target_size,
+								dimensions,
+								maintain_ratio,
+								algorithm,
+								quality,
+								optimize_for_web,
+							),
+							Message::ProcessingComplete
+						);
+					}
+				}
+			}
             Message::ProcessingComplete(results) => {
                 self.is_processing = false;
                 self.progress = 1.0;
@@ -156,7 +247,7 @@ impl Application for ImageResizer {
 
     fn view(&self) -> Element<Message> {
         // Title
-        let title = text("Image Resizer")
+        let title = text("Advanced Image Resizer")
             .size(22)
             .font(HEADING_FONT);
 
@@ -175,8 +266,8 @@ impl Application for ImageResizer {
             ].spacing(8),
             if let Some(path) = &self.selected_path {
                 let display_path = path.display().to_string();
-                let truncated = if display_path.len() > 50 {
-                    format!("...{}", &display_path[display_path.len()-47..])
+                let truncated = if display_path.len() > 60 {
+                    format!("...{}", &display_path[display_path.len()-57..])
                 } else {
                     display_path
                 };
@@ -190,9 +281,96 @@ impl Application for ImageResizer {
             }
         ].spacing(8);
 
-        // Parameters
+        // Mode selection
+        let mode_selection = column![
+            text("Compression Mode")
+                .size(16)
+                .font(HEADING_FONT),
+            row![
+                radio(
+                    "Simple",
+                    CompressionMode::Simple,
+                    Some(self.compression_mode),
+                    Message::ModeChanged,
+                ).size(13).spacing(8),
+                Space::with_width(20),
+                radio(
+                    "Advanced",
+                    CompressionMode::Advanced,
+                    Some(self.compression_mode),
+                    Message::ModeChanged,
+                ).size(13).spacing(8),
+            ].spacing(12),
+        ].spacing(8);
+
+        // Compression settings (varies by mode)
+        let compression_settings = match self.compression_mode {
+            CompressionMode::Simple => {
+                // Simple mode - just quality slider
+				column![
+						checkbox("Auto Scale (resize to meet target size)", self.auto_scale, Message::AutoScaleToggled)
+							.size(13)
+							.spacing(8),
+					].spacing(8)            }
+            CompressionMode::Advanced => {
+                // Advanced mode - full algorithm selection
+                column![
+                    text("Compression Settings")
+                        .size(16)
+                        .font(HEADING_FONT),
+                    row![
+                        text("Algorithm:")
+                            .size(13)
+                            .font(BODY_FONT)
+                            .width(80),
+                        pick_list(
+							&[
+								CompressionAlgorithm::Auto,
+								CompressionAlgorithm::Simple, // Add this
+								CompressionAlgorithm::StandardJpeg,
+								CompressionAlgorithm::MozJpeg,
+								CompressionAlgorithm::StandardPng,
+								CompressionAlgorithm::OptiPng,
+								CompressionAlgorithm::OxiPng,
+								CompressionAlgorithm::PngQuant,
+								CompressionAlgorithm::WebPLossy,
+								CompressionAlgorithm::WebPLossless,
+							][..],
+							Some(self.compression_algorithm),
+							Message::AlgorithmSelected,
+						)
+                    ].spacing(8),
+                    
+                    // Quality slider (only for lossy formats)
+                    if self.compression_algorithm.supports_quality() {
+                        column![
+                            row![
+                                text("Quality:")
+                                    .size(13)
+                                    .font(BODY_FONT)
+                                    .width(80),
+                                slider(10..=100, self.quality_slider, Message::QualityChanged)
+                                    .width(Length::Fill),
+                                text(format!("{}%", self.quality_slider))
+                                    .size(13)
+                                    .font(BODY_FONT)
+                                    .width(40),
+                            ].spacing(8),
+                        ].spacing(4)
+                    } else {
+                        column![]
+                    },
+                    
+                    checkbox("Optimize for web", self.optimize_for_web, Message::OptimizeForWebToggled)
+                        .size(13)
+                        .spacing(8),
+                ].spacing(8)
+            }
+        };
+
+        // Size parameters
         let parameters = column![
-            text("Parameters")
+            text("Size Parameters")
                 .size(16)
                 .font(HEADING_FONT),
             row![
@@ -207,7 +385,7 @@ impl Application for ImageResizer {
                     .size(13),
             ].spacing(8),
             row![
-                text("Size:")
+                text("Dimensions:")
                     .size(13)
                     .font(BODY_FONT)
                     .width(80),
@@ -275,9 +453,10 @@ impl Application for ImageResizer {
                         .font(BODY_FONT)
                         .width(Length::Fill),
                     if result.success {
-                        text(format!("{} → {} KB", 
+                        text(format!("{} → {} KB ({})", 
                             result.original_size / 1024, 
-                            result.new_size / 1024
+                            result.new_size / 1024,
+                            result.algorithm_used.file_extension()
                         ))
                         .size(12)
                         .font(BODY_FONT)
@@ -296,7 +475,7 @@ impl Application for ImageResizer {
                 container(
                     scrollable(
                         column(results_list).spacing(3)
-                    ).height(Length::Fixed(120.0))
+                    ).height(Length::Fixed(100.0))
                 )
                 .style(iced::theme::Container::Box)
                 .padding(8),
@@ -319,6 +498,10 @@ impl Application for ImageResizer {
             Space::with_height(12),
             file_selection,
             Space::with_height(12),
+            mode_selection,
+            Space::with_height(12),
+            compression_settings,
+            Space::with_height(12),
             parameters,
             Space::with_height(12),
             process_button,
@@ -336,12 +519,30 @@ impl Application for ImageResizer {
         container(content)
             .width(Length::Fill)
             .height(Length::Fill)
-            .center_x()
+            //.center_x()
             .into()
     }
 
     fn theme(&self) -> Theme {
         Theme::Light
+    }
+}
+
+impl std::fmt::Display for CompressionAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "Auto (Smart Selection)"),
+            Self::Simple => write!(f, "Simple (Fast)"), // Add this
+            Self::StandardJpeg => write!(f, "JPEG Standard"),
+            Self::MozJpeg => write!(f, "JPEG (MozJPEG)"),
+            Self::StandardPng => write!(f, "PNG Standard"),
+            Self::OptiPng => write!(f, "PNG (OptiPNG)"),
+            Self::OxiPng => write!(f, "PNG (OxiPNG)"),
+            Self::PngQuant => write!(f, "PNG (PNGQuant Lossy)"),
+            Self::WebPLossy => write!(f, "WebP Lossy"),
+            Self::WebPLossless => write!(f, "WebP Lossless"),
+            Self::Avif => write!(f, "AVIF"),
+        }
     }
 }
 
@@ -368,13 +569,17 @@ fn parse_dimensions(width: &str, height: &str) -> Option<(u32, u32)> {
     }
 }
 
-async fn process_images(
+async fn process_images_advanced(
     path: PathBuf,
     target_size_kb: Option<u64>,
     dimensions: Option<(u32, u32)>,
     maintain_ratio: bool,
+    algorithm: CompressionAlgorithm,
+    quality: u8,
+    optimize_for_web: bool,
 ) -> Vec<ProcessResult> {
     tokio::task::spawn_blocking(move || {
+        let compressor = SmartCompressor::new();
         let images = collect_images(&path).unwrap_or_default();
         let mut results = Vec::new();
         
@@ -384,7 +589,16 @@ async fn process_images(
                 .to_string_lossy()
                 .to_string();
             
-            let result = process_single_image(&image_path, target_size_kb, dimensions, maintain_ratio);
+            let result = process_single_image_advanced(
+                &image_path,
+                target_size_kb,
+                dimensions,
+                maintain_ratio,
+                algorithm,
+                quality,
+                optimize_for_web,
+                &compressor,
+            );
             
             results.push(ProcessResult {
                 filename,
@@ -392,6 +606,8 @@ async fn process_images(
                 new_size: result.new_size,
                 success: result.success,
                 message: result.message,
+                algorithm_used: result.algorithm_used,
+                compression_ratio: result.compression_ratio,
             });
         }
         
@@ -399,12 +615,152 @@ async fn process_images(
     }).await.unwrap_or_default()
 }
 
-// Image processing
 struct InternalResult {
     original_size: u64,
     new_size: u64,
     success: bool,
     message: String,
+    algorithm_used: CompressionAlgorithm,
+    compression_ratio: f32,
+}
+
+fn process_single_image_advanced(
+    input_path: &Path,
+    target_size_kb: Option<u64>,
+    dimensions: Option<(u32, u32)>,
+    maintain_ratio: bool,
+    algorithm: CompressionAlgorithm,
+    quality: u8,
+    optimize_for_web: bool,
+    compressor: &SmartCompressor,
+) -> InternalResult {
+    let original_size = match fs::metadata(input_path) {
+        Ok(metadata) => metadata.len(),
+        Err(e) => {
+            return InternalResult {
+                original_size: 0,
+                new_size: 0,
+                success: false,
+                message: format!("Failed to read: {}", e),
+                algorithm_used: algorithm,
+                compression_ratio: 0.0,
+            };
+        }
+    };
+    
+    // For Simple algorithm, use the simple processing logic
+    if algorithm == CompressionAlgorithm::Simple {
+		let auto_scale = false; // Default to false for direct API usage		
+        let result = simple::process_single_image(
+            input_path,
+            target_size_kb,
+            dimensions,
+            maintain_ratio,
+			auto_scale,
+        );
+        
+        return InternalResult {
+            original_size: result.original_size,
+            new_size: result.new_size,
+            success: result.success,
+            message: result.message,
+            algorithm_used: CompressionAlgorithm::Simple,
+            compression_ratio: if result.original_size > 0 {
+                result.new_size as f32 / result.original_size as f32
+            } else {
+                0.0
+            },
+        };
+    }
+    
+    // Rest of the advanced processing code...
+    let mut img = match image::open(input_path) {
+        Ok(img) => img,
+        Err(e) => {
+            return InternalResult {
+                original_size,
+                new_size: 0,
+                success: false,
+                message: format!("Failed to open: {}", e),
+                algorithm_used: algorithm,
+                compression_ratio: 0.0,
+            };
+        }
+    };
+    
+    // Apply dimension resize if specified
+    if let Some((width, height)) = dimensions {
+        img = if maintain_ratio {
+            img.resize(width, height, image::imageops::FilterType::Lanczos3)
+        } else {
+            img.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
+        };
+    }
+    
+    // Create compression options
+    let options = CompressionOptions {
+        algorithm,
+        quality: Some(quality),
+        target_size: target_size_kb.map(|kb| kb * 1024),
+        preserve_metadata: false,
+        optimize_for_web,
+    };
+    
+    // Compress using advanced algorithm
+    let compression_result = match compressor.compress(&img, options) {
+        Ok(result) => result,
+        Err(e) => {
+            return InternalResult {
+                original_size,
+                new_size: 0,
+                success: false,
+                message: format!("Compression failed: {}", e),
+                algorithm_used: algorithm,
+                compression_ratio: 0.0,
+            };
+        }
+    };
+    
+    // Create output directory
+    let output_dir = input_path.parent().unwrap_or(Path::new(".")).join("resized");
+    if let Err(e) = fs::create_dir_all(&output_dir) {
+        return InternalResult {
+            original_size,
+            new_size: 0,
+            success: false,
+            message: format!("Failed to create dir: {}", e),
+            algorithm_used: algorithm,
+            compression_ratio: 0.0,
+        };
+    }
+    
+    // Determine output filename with appropriate extension
+    let output_path = output_dir.join(format!(
+        "{}_resized.{}",
+        input_path.file_stem().unwrap().to_string_lossy(),
+        compression_result.algorithm_used.file_extension()
+    ));
+    
+    // Save compressed image
+    if let Err(e) = fs::write(&output_path, &compression_result.data) {
+        return InternalResult {
+            original_size,
+            new_size: 0,
+            success: false,
+            message: format!("Save failed: {}", e),
+            algorithm_used: algorithm,
+            compression_ratio: 0.0,
+        };
+    }
+    
+    InternalResult {
+        original_size,
+        new_size: compression_result.data.len() as u64,
+        success: true,
+        message: String::new(),
+        algorithm_used: compression_result.algorithm_used,
+        compression_ratio: compression_result.compression_ratio,
+    }
 }
 
 fn collect_images(path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
@@ -428,154 +784,8 @@ fn is_image_file(path: &Path) -> bool {
     match path.extension() {
         Some(ext) => {
             let ext = ext.to_string_lossy().to_lowercase();
-            matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp")
+            matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "avif")
         }
         None => false,
     }
-}
-
-fn process_single_image(
-    input_path: &Path,
-    target_size_kb: Option<u64>,
-    dimensions: Option<(u32, u32)>,
-    maintain_ratio: bool,
-) -> InternalResult {
-    let original_size = match fs::metadata(input_path) {
-        Ok(metadata) => metadata.len(),
-        Err(e) => {
-            return InternalResult {
-                original_size: 0,
-                new_size: 0,
-                success: false,
-                message: format!("Failed to read: {}", e),
-            };
-        }
-    };
-    
-    let mut img = match image::open(input_path) {
-        Ok(img) => img,
-        Err(e) => {
-            return InternalResult {
-                original_size,
-                new_size: 0,
-                success: false,
-                message: format!("Failed to open: {}", e),
-            };
-        }
-    };
-    
-    if let Some((width, height)) = dimensions {
-        img = if maintain_ratio {
-            img.resize(width, height, image::imageops::FilterType::Lanczos3)
-        } else {
-            img.resize_exact(width, height, image::imageops::FilterType::Lanczos3)
-        };
-    }
-    
-    let output_dir = input_path.parent().unwrap_or(Path::new(".")).join("resized");
-    if let Err(e) = fs::create_dir_all(&output_dir) {
-        return InternalResult {
-            original_size,
-            new_size: 0,
-            success: false,
-            message: format!("Failed to create dir: {}", e),
-        };
-    }
-    
-    let output_path = output_dir.join(format!(
-        "{}_resized.{}",
-        input_path.file_stem().unwrap().to_string_lossy(),
-        input_path.extension().unwrap_or_default().to_string_lossy()
-    ));
-    
-    if target_size_kb.is_none() {
-        match img.save(&output_path) {
-            Ok(_) => {
-                let new_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
-                InternalResult {
-                    original_size,
-                    new_size,
-                    success: true,
-                    message: String::new(),
-                }
-            }
-            Err(e) => InternalResult {
-                original_size,
-                new_size: 0,
-                success: false,
-                message: format!("Save failed: {}", e),
-            },
-        }
-    } else {
-        match compress_to_size(img, target_size_kb.unwrap(), &output_path) {
-            Ok(new_size) => InternalResult {
-                original_size,
-                new_size,
-                success: true,
-                message: String::new(),
-            },
-            Err(e) => InternalResult {
-                original_size,
-                new_size: 0,
-                success: false,
-                message: e.to_string(),
-            },
-        }
-    }
-}
-
-fn compress_to_size(
-    mut img: DynamicImage,
-    target_kb: u64,
-    output_path: &Path,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let target_bytes = target_kb * 1024;
-    let format = ImageFormat::Jpeg;
-    
-    for quality in (20..=95).rev().step_by(5) {
-        let buffer = save_to_buffer(&img, format, quality)?;
-        
-        if buffer.len() <= target_bytes as usize {
-            fs::write(output_path, &buffer)?;
-            return Ok(buffer.len() as u64);
-        }
-    }
-    
-    let mut scale = 0.9;
-    while scale > 0.5 {
-        let new_width = (img.width() as f32 * scale) as u32;
-        let new_height = (img.height() as f32 * scale) as u32;
-        img = img.resize(new_width, new_height, image::imageops::FilterType::Lanczos3);
-        
-        let buffer = save_to_buffer(&img, format, 75)?;
-        
-        if buffer.len() <= target_bytes as usize {
-            fs::write(output_path, &buffer)?;
-            return Ok(buffer.len() as u64);
-        }
-        
-        scale *= 0.9;
-    }
-    
-    Err("Could not achieve target file size".into())
-}
-
-fn save_to_buffer(
-    img: &DynamicImage,
-    format: ImageFormat,
-    quality: u8,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut buffer = Cursor::new(Vec::new());
-    
-    match format {
-        ImageFormat::Jpeg => {
-            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, quality);
-            img.write_with_encoder(encoder)?;
-        }
-        _ => {
-            img.write_to(&mut buffer, format)?;
-        }
-    }
-    
-    Ok(buffer.into_inner())
 }
