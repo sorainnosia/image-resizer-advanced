@@ -22,7 +22,7 @@ jobs:
       - uses: ilammy/setup-nasm@v1          
       - name: Build
         run: |
-          sudo apt-get install -y gcc-multilib libssl-dev pkg-config glib-sys
+          sudo apt-get install -y gcc-multilib libssl-dev pkg-config libglib2.0-dev pkg-config
           export OPENSSL_DIR=usr/local/ssl 
           export OPENSSL_INCLUDE_DIR=/usr/include
           export PKG_CONFIG_PATH=usr/lib/x86_64-linux-gnu/pkgconfig
