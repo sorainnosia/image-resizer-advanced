@@ -1,15 +1,24 @@
-// compression.rs - Advanced compression algorithms module
+// compression.rs - Advanced compression algorithms module with native libraries
 
-use image::{DynamicImage, ImageFormat, GenericImageView, Rgba, Pixel};
+use image::{DynamicImage, ImageFormat, GenericImageView, Rgba, Pixel, RgbImage, RgbaImage};
 use std::io::Cursor;
 use std::collections::HashSet;
 use crate::simple;
 
+// Native compression library imports
+use mozjpeg::{Compress, ColorSpace, ScanMode};
+use oxipng::{Options as OxiOptions, RowFilter, StripChunks};
+use indexmap::IndexSet;
+use webp::{Encoder as WebPEncoder, WebPMemory};
+use ravif::{Encoder as AvifEncoder, EncodedImage};
+use imgref::ImgVec;
+use rgb::{RGB8, RGBA8};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressionAlgorithm {
     Auto,
-	#[default]
-	Simple,
+    #[default]
+    Simple,
     // JPEG algorithms
     StandardJpeg,
     MozJpeg,
@@ -87,7 +96,7 @@ impl SmartCompressor {
         
         match algorithm {
             CompressionAlgorithm::Auto => unreachable!(),
-			CompressionAlgorithm::Simple => self.compress_standard_jpeg(image, &options),
+            CompressionAlgorithm::Simple => self.compress_standard_jpeg(image, &options),
             CompressionAlgorithm::StandardJpeg => self.compress_standard_jpeg(image, &options),
             CompressionAlgorithm::MozJpeg => self.compress_mozjpeg(image, &options),
             CompressionAlgorithm::StandardPng => self.compress_standard_png(image, &options),
@@ -138,7 +147,7 @@ impl SmartCompressor {
             (true, _, colors) if colors > 256 => CompressionAlgorithm::WebPLossy,
             
             // Simple graphics with few colors -> PNG
-            (_, false, colors) if colors <= 256 => CompressionAlgorithm::OptiPng,
+            (_, false, colors) if colors <= 256 => CompressionAlgorithm::OxiPng,
             
             // Complex images with transparency -> WebP
             (true, _, _) => CompressionAlgorithm::WebPLossy,
@@ -191,37 +200,56 @@ impl SmartCompressor {
         image: &DynamicImage,
         options: &CompressionOptions,
     ) -> Result<CompressionResult, Box<dyn std::error::Error>> {
-        // Note: This is a simulation since mozjpeg-rust requires additional setup
-        // In production, you would use the mozjpeg crate
-        
-        // For now, use optimized standard JPEG settings
         let rgb_image = image.to_rgb8();
+        let (width, height) = rgb_image.dimensions();
         let quality = options.quality.unwrap_or(85);
         
-        // Simulate MozJPEG optimizations
-        let mut encoder_options = vec![];
-        encoder_options.push("optimize_coding");
-        encoder_options.push("progressive");
+        // Convert quality from 0-100 to mozjpeg's float scale
+        let moz_quality = quality as f32;
         
-        // Use standard JPEG with optimization flags
-        let mut result_data = Vec::new();
-        let mut cursor = Cursor::new(&mut result_data);
+        // Create MozJPEG compressor
+        let mut compress = Compress::new(ColorSpace::JCS_RGB);
+        compress.set_size(width as usize, height as usize);
+        compress.set_quality(moz_quality);
         
-        // Progressive encoding typically gives better compression
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, quality);
+        // Enable progressive encoding for better web performance
+        if options.optimize_for_web {
+            compress.set_scan_optimization_mode(ScanMode::AllComponentsTogether);
+            compress.set_progressive_mode();
+        }
         
-        let (width, height) = rgb_image.dimensions();
-        encoder.encode(
-            &rgb_image,
-            width,
-            height,
-            image::ColorType::Rgb8,
-        )?;
+        // Create a buffer to write to
+        let mut output_data = Vec::new();
         
-        let compression_ratio = self.calculate_ratio(image, &result_data);
+        // Start compression with the writer
+        let mut compress_started = compress.start_compress(&mut output_data)?;
+        
+        // Get raw pixel data
+        let pixels = rgb_image.as_flat_samples();
+        let data = pixels.as_slice();
+        
+        // Process scanlines
+        let row_stride = width as usize * 3;
+        for y in 0..height as usize {
+            let start = y * row_stride;
+            let end = start + row_stride;
+            compress_started.write_scanlines(&data[start..end])?;
+        }
+        
+        // Finish compression
+        compress_started.finish_compress()?;
+        
+        // Handle target size if specified
+        let final_data = if let Some(target_size) = options.target_size {
+            self.mozjpeg_target_size(&rgb_image, target_size, options.optimize_for_web)?
+        } else {
+            output_data
+        };
+        
+        let compression_ratio = self.calculate_ratio(image, &final_data);
         
         Ok(CompressionResult {
-            data: result_data,
+            data: final_data,
             format: ImageFormat::Jpeg,
             algorithm_used: CompressionAlgorithm::MozJpeg,
             final_quality: Some(quality),
@@ -262,7 +290,12 @@ impl SmartCompressor {
         image: &DynamicImage,
         _options: &CompressionOptions,
     ) -> Result<CompressionResult, Box<dyn std::error::Error>> {
-        // Simulate OptiPNG optimizations
+        // First encode as PNG
+        let mut png_data = Vec::new();
+        let mut cursor = Cursor::new(&mut png_data);
+        image.write_to(&mut cursor, ImageFormat::Png)?;
+        
+        // Now optimize with a simple filter search
         let filters = [
             image::codecs::png::FilterType::NoFilter,
             image::codecs::png::FilterType::Sub,
@@ -272,8 +305,8 @@ impl SmartCompressor {
             image::codecs::png::FilterType::Adaptive,
         ];
         
-        let mut best_result = Vec::new();
-        let mut best_size = usize::MAX;
+        let mut best_result = png_data.clone();
+        let mut best_size = png_data.len();
         
         for filter in filters {
             let mut temp_data = Vec::new();
@@ -307,41 +340,60 @@ impl SmartCompressor {
         image: &DynamicImage,
         options: &CompressionOptions,
     ) -> Result<CompressionResult, Box<dyn std::error::Error>> {
-        // OxiPNG would use similar optimizations to OptiPNG but with Rust-native performance
-        // For now, use enhanced PNG compression
-        self.compress_optipng(image, options)
+        // First encode as PNG
+        let mut png_data = Vec::new();
+        let mut cursor = Cursor::new(&mut png_data);
+        image.write_to(&mut cursor, ImageFormat::Png)?;
+        
+        // Configure OxiPNG options
+        let mut oxipng_options = OxiOptions::from_preset(3); // Good balance of speed/compression
+        
+        if options.optimize_for_web {
+            oxipng_options.strip = StripChunks::Safe;
+        } else if options.preserve_metadata {
+            oxipng_options.strip = StripChunks::None;
+        } else {
+            oxipng_options.strip = StripChunks::All;
+        }
+        
+        // Enable all filter types for best compression
+        let mut filter_set = IndexSet::new();
+        filter_set.insert(RowFilter::None);
+        filter_set.insert(RowFilter::Sub);
+        filter_set.insert(RowFilter::Up);
+        filter_set.insert(RowFilter::Average);
+        filter_set.insert(RowFilter::Paeth);
+        oxipng_options.filter = filter_set;
+        
+        // Optimize the PNG data
+        let optimized_data = oxipng::optimize_from_memory(&png_data, &oxipng_options)?;
+        
+        let compression_ratio = self.calculate_ratio(image, &optimized_data);
+        
+        Ok(CompressionResult {
+            data: optimized_data,
+            format: ImageFormat::Png,
+            algorithm_used: CompressionAlgorithm::OxiPng,
+            final_quality: None,
+            compression_ratio,
+        })
     }
     
     fn compress_pngquant(
         &self,
         image: &DynamicImage,
-        _options: &CompressionOptions,
+        options: &CompressionOptions,
     ) -> Result<CompressionResult, Box<dyn std::error::Error>> {
-        // Simulate PNGQuant lossy compression by reducing colors
+        // For PNGQuant simulation, we'll quantize colors then use OxiPNG
         let max_colors = 256;
         let quantized = self.quantize_image(image, max_colors);
         
-        // Now compress as PNG
-        let mut result_data = Vec::new();
-        let mut cursor = Cursor::new(&mut result_data);
-        
-        let encoder = image::codecs::png::PngEncoder::new_with_quality(
-            &mut cursor,
-            image::codecs::png::CompressionType::Best,
-            image::codecs::png::FilterType::Adaptive,
-        );
-        
-        quantized.write_with_encoder(encoder)?;
-        
-        let compression_ratio = self.calculate_ratio(image, &result_data);
-        
-        Ok(CompressionResult {
-            data: result_data,
-            format: ImageFormat::Png,
-            algorithm_used: CompressionAlgorithm::PngQuant,
-            final_quality: None,
-            compression_ratio,
-        })
+        // Now compress with OxiPNG for best results
+        self.compress_oxipng(&quantized, options)
+            .map(|mut result| {
+                result.algorithm_used = CompressionAlgorithm::PngQuant;
+                result
+            })
     }
     
     // WebP Compression Methods
@@ -350,39 +402,69 @@ impl SmartCompressor {
         image: &DynamicImage,
         options: &CompressionOptions,
     ) -> Result<CompressionResult, Box<dyn std::error::Error>> {
-        // Note: This would use the webp crate in production
-        // For now, convert to optimized JPEG as fallback
-        let quality = options.quality.unwrap_or(85);
+        let quality = options.quality.unwrap_or(85) as f32;
         
-        // Simulate WebP by using highly optimized JPEG
-        // In a real implementation, this would create actual WebP format
-        let result = self.compress_mozjpeg(image, options)?;
+        // Convert to RGBA for WebP encoder
+        let rgba_image = image.to_rgba8();
+        let (width, height) = rgba_image.dimensions();
         
-        // Override the format and algorithm info
+        // Create WebP encoder
+        let encoder = WebPEncoder::from_rgba(
+            rgba_image.as_raw(),
+            width,
+            height,
+        );
+        
+        // Encode with specified quality
+        let memory = encoder.encode(quality);
+        let data = memory.to_vec();
+        
+        // Handle target size if specified
+        let final_data = if let Some(target_size) = options.target_size {
+            self.webp_target_size(&rgba_image, target_size, true)?
+        } else {
+            data
+        };
+        
+        let compression_ratio = self.calculate_ratio(image, &final_data);
+        
         Ok(CompressionResult {
-            data: result.data,
-            format: ImageFormat::Jpeg, // Would be WebP in real implementation
+            data: final_data,
+            format: ImageFormat::WebP,
             algorithm_used: CompressionAlgorithm::WebPLossy,
-            final_quality: Some(quality),
-            compression_ratio: result.compression_ratio,
+            final_quality: Some(quality as u8),
+            compression_ratio,
         })
     }
     
     fn compress_webp_lossless(
         &self,
         image: &DynamicImage,
-        options: &CompressionOptions,
+        _options: &CompressionOptions,
     ) -> Result<CompressionResult, Box<dyn std::error::Error>> {
-        // Simulate WebP lossless with optimized PNG
-        let result = self.compress_optipng(image, options)?;
+        // Convert to RGBA for WebP encoder
+        let rgba_image = image.to_rgba8();
+        let (width, height) = rgba_image.dimensions();
         
-        // Override the algorithm info
+        // Create WebP encoder for lossless
+        let encoder = WebPEncoder::from_rgba(
+            rgba_image.as_raw(),
+            width,
+            height,
+        );
+        
+        // Encode losslessly (quality 100 triggers lossless mode in libwebp)
+        let memory = encoder.encode_lossless();
+        let data = memory.to_vec();
+        
+        let compression_ratio = self.calculate_ratio(image, &data);
+        
         Ok(CompressionResult {
-            data: result.data,
-            format: result.format,
+            data,
+            format: ImageFormat::WebP,
             algorithm_used: CompressionAlgorithm::WebPLossless,
             final_quality: None,
-            compression_ratio: result.compression_ratio,
+            compression_ratio,
         })
     }
     
@@ -392,21 +474,179 @@ impl SmartCompressor {
         image: &DynamicImage,
         options: &CompressionOptions,
     ) -> Result<CompressionResult, Box<dyn std::error::Error>> {
-        // AVIF would require the rav1e or libavif crate
-        // For now, use WebP as fallback
-        let result = self.compress_webp_lossy(image, options)?;
+        let quality = options.quality.unwrap_or(80) as f32 / 100.0; // ravif uses 0.0-1.0 scale
         
-        // Override the algorithm info
+        // Convert to RGBA8 for AVIF encoder
+        let rgba_image = image.to_rgba8();
+        let (width, height) = rgba_image.dimensions();
+        
+        // Convert to imgref format required by ravif
+        let pixels: Vec<RGBA8> = rgba_image
+            .pixels()
+            .map(|p| RGBA8 {
+                r: p[0],
+                g: p[1],
+                b: p[2],
+                a: p[3],
+            })
+            .collect();
+        
+        let img = ImgVec::new(pixels, width as usize, height as usize);
+        
+        // Create encoder and encode - ravif has a simple API
+        let encoder = AvifEncoder::new();
+        let encoded = encoder.encode_rgba(img.as_ref())?;
+        
+        let data = encoded.avif_file;
+        
+        // Handle target size if specified
+        let final_data = if let Some(target_size) = options.target_size {
+            // For simplicity, we'll use the standard AVIF encoding
+            // as ravif doesn't easily support quality adjustment
+            data
+        } else {
+            data
+        };
+        
+        let compression_ratio = self.calculate_ratio(image, &final_data);
+        
         Ok(CompressionResult {
-            data: result.data,
-            format: result.format,
+            data: final_data,
+            format: ImageFormat::Avif,
             algorithm_used: CompressionAlgorithm::Avif,
-            final_quality: result.final_quality,
-            compression_ratio: result.compression_ratio,
+            final_quality: Some((quality * 100.0) as u8),
+            compression_ratio,
         })
     }
     
-    // Helper methods
+    // Helper methods for target size compression
+    fn mozjpeg_target_size(
+        &self,
+        image: &RgbImage,
+        target_bytes: u64,
+        optimize_for_web: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let (width, height) = image.dimensions();
+        let mut low = 10u8;
+        let mut high = 95u8;
+        let mut best_result = Vec::new();
+        
+        while low <= high {
+            let quality = (low + high) / 2;
+            
+            let mut compress = Compress::new(ColorSpace::JCS_RGB);
+            compress.set_size(width as usize, height as usize);
+            compress.set_quality(quality as f32);
+            
+            if optimize_for_web {
+                compress.set_scan_optimization_mode(ScanMode::AllComponentsTogether);
+                compress.set_progressive_mode();
+            }
+            
+            let mut output_data = Vec::new();
+            let mut compress_started = compress.start_compress(&mut output_data)?;
+            
+            let pixels = image.as_flat_samples();
+            let data = pixels.as_slice();
+            let row_stride = width as usize * 3;
+            
+            for y in 0..height as usize {
+                let start = y * row_stride;
+                let end = start + row_stride;
+                compress_started.write_scanlines(&data[start..end])?;
+            }
+            
+            compress_started.finish_compress()?;
+            
+            if output_data.len() as u64 <= target_bytes {
+                best_result = output_data;
+                low = quality + 1;
+            } else {
+                high = quality - 1;
+            }
+        }
+        
+        if best_result.is_empty() {
+            Err("Could not achieve target file size with MozJPEG".into())
+        } else {
+            Ok(best_result)
+        }
+    }
+    
+    fn webp_target_size(
+        &self,
+        image: &RgbaImage,
+        target_bytes: u64,
+        lossy: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let (width, height) = image.dimensions();
+        
+        if lossy {
+            let mut low = 10.0f32;
+            let mut high = 95.0f32;
+            let mut best_result = Vec::new();
+            
+            while high - low > 1.0 {
+                let quality = (low + high) / 2.0;
+                
+                let encoder = WebPEncoder::from_rgba(image.as_raw(), width, height);
+                let memory = encoder.encode(quality);
+                let data = memory.to_vec();
+                
+                if data.len() as u64 <= target_bytes {
+                    best_result = data;
+                    low = quality;
+                } else {
+                    high = quality;
+                }
+            }
+            
+            if best_result.is_empty() {
+                Err("Could not achieve target file size with WebP".into())
+            } else {
+                Ok(best_result)
+            }
+        } else {
+            // For lossless, we can't adjust quality, so just return the lossless result
+            let encoder = WebPEncoder::from_rgba(image.as_raw(), width, height);
+            let memory = encoder.encode_lossless();
+            Ok(memory.to_vec())
+        }
+    }
+    
+    fn avif_target_size(
+        &self,
+        image: &DynamicImage,
+        target_bytes: u64,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        // Since ravif doesn't easily support quality adjustment,
+        // we'll just return a single encoding
+        let rgba_image = image.to_rgba8();
+        let (width, height) = rgba_image.dimensions();
+        
+        let pixels: Vec<RGBA8> = rgba_image
+            .pixels()
+            .map(|p| RGBA8 {
+                r: p[0],
+                g: p[1],
+                b: p[2],
+                a: p[3],
+            })
+            .collect();
+        
+        let img = ImgVec::new(pixels, width as usize, height as usize);
+        
+        let encoder = AvifEncoder::new();
+        let encoded = encoder.encode_rgba(img.as_ref())?;
+        
+        if encoded.avif_file.len() as u64 <= target_bytes {
+            Ok(encoded.avif_file)
+        } else {
+            Err("AVIF file exceeds target size".into())
+        }
+    }
+    
+    // Existing helper methods remain the same...
     fn has_alpha_channel(&self, image: &image::RgbaImage) -> bool {
         image.pixels().any(|p| p[3] < 255)
     }
@@ -487,18 +727,18 @@ impl SmartCompressor {
             .collect()
     }
     
-    fn quantize_image(&self, image: &DynamicImage, _max_colors: usize) -> DynamicImage {
+    fn quantize_image(&self, image: &DynamicImage, max_colors: usize) -> DynamicImage {
         // Simple color quantization
-        // In production, use a proper quantization algorithm like NeuQuant
         let rgba = image.to_rgba8();
         let mut quantized = rgba.clone();
         
-        // Simple posterization as placeholder
-        // TODO: Implement actual color quantization using max_colors parameter
+        // Calculate quantization factor based on max_colors
+        let factor = (256.0 / (max_colors as f32).sqrt()) as u8;
+        
         for pixel in quantized.pixels_mut() {
-            pixel[0] = (pixel[0] / 32) * 32;
-            pixel[1] = (pixel[1] / 32) * 32;
-            pixel[2] = (pixel[2] / 32) * 32;
+            pixel[0] = (pixel[0] / factor) * factor;
+            pixel[1] = (pixel[1] / factor) * factor;
+            pixel[2] = (pixel[2] / factor) * factor;
         }
         
         DynamicImage::ImageRgba8(quantized)
@@ -556,7 +796,7 @@ impl CompressionAlgorithm {
     pub fn description(&self) -> &'static str {
         match self {
             Self::Auto => "Automatically select best algorithm based on image analysis",
-			Self::Simple => "Use lowest acceptable image quality",
+            Self::Simple => "Use lowest acceptable image quality",
             Self::StandardJpeg => "Standard JPEG compression (fast, good quality)",
             Self::MozJpeg => "Mozilla JPEG encoder (10-15% better compression)",
             Self::StandardPng => "Standard PNG compression (lossless)",
@@ -588,7 +828,7 @@ impl CompressionAlgorithm {
     pub fn file_extension(&self) -> &'static str {
         match self {
             Self::Auto => "jpg",
-			Self::Simple => "jpg",
+            Self::Simple => "jpg",
             Self::StandardJpeg | Self::MozJpeg => "jpg",
             Self::StandardPng | Self::OptiPng | Self::OxiPng | Self::PngQuant => "png",
             Self::WebPLossy | Self::WebPLossless => "webp",

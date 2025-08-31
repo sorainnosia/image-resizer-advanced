@@ -1,6 +1,6 @@
 [package]
 name = "image-resizer-advanced"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 
 [dependencies]
@@ -8,13 +8,18 @@ edition = "2021"
 iced = { version = "0.10", features = ["tokio", "image"] }
 
 # Image processing
-image = { version = "0.24", features = ["jpeg", "png", "gif", "webp", "bmp", "avif"] }
+image = { version = "0.24", features = ["jpeg", "png", "gif", "webp", "bmp"] }
 
-# Compression libraries (optional - for full implementation)
-# mozjpeg = { version = "0.10", optional = true }
-# oxipng = { version = "8.0", optional = true }
-# webp = { version = "0.2", optional = true }
-# ravif = { version = "0.11", optional = true }  # For AVIF
+# Native compression libraries
+mozjpeg = "0.10"
+oxipng = "9.0"
+libwebp-sys = "0.9"
+webp = "0.2"
+ravif = "0.11"
+rav1e = "0.7"
+imgref = "1.10"
+rgb = "0.8"
+indexmap = "2.0"
 
 # File handling
 walkdir = "2.4"
@@ -24,18 +29,11 @@ open = "5.0"
 # Async runtime
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 
-# [features]
-# full-compression = ["mozjpeg", "oxipng", "webp", "ravif"]
- 
-
-# Note: For full implementation with all compression libraries:
-# 1. Uncomment the optional dependencies
-# 2. Enable the "full-compression" feature
-# 3. Update the compression module to use native libraries
+# Additional utilities
+rayon = "1.8"  # For parallel processing in oxipng
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
-
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-Ctarget-feature=+crt-static"]
@@ -43,8 +41,6 @@ rustflags = ["-Ctarget-feature=+crt-static"]
 rustflags = ["-Ctarget-feature=+crt-static","-Clink-arg=-static"]
 [target.i686-pc-windows-msvc]
 rustflags = ["-Ctarget-feature=+crt-static"]
-[target.wasm32-unknown-unknown]
-default = ["wasm"]
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-Ctarget-feature=+crt-static"]
 [target.x86_64-unknown-linux-musl]
@@ -53,9 +49,7 @@ rustflags = ["-Ctarget-feature=+crt-static"]
 rustflags = ["-Ctarget-feature=+crt-static"]
 
 [profile.release]
-opt-level = 'z'     # Optimize for size
-lto = true          # Enable link-time optimization
-codegen-units = 1   # Reduce number of codegen units to increase optimizations
-panic = 'abort'     # Abort on panic
-#strip = true        # Strip symbols from binary*
-
+#opt-level = 3       # Optimize for speed
+#lto = true          # Enable link-time optimization
+#codegen-units = 1   # Reduce number of codegen units to increase optimizations
+#strip = true        # Strip symbols from binary
