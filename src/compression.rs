@@ -7,7 +7,6 @@ use crate::simple;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressionAlgorithm {
-    
     Auto,
 	#[default]
 	Simple,
