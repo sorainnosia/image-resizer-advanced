@@ -57,8 +57,8 @@ impl Default for CompressionMode {
 pub fn main() -> iced::Result {
     ImageResizer::run(Settings {
         window: iced::window::Settings {
-            size: (580, 680),
-            min_size: Some((560, 680)),
+            size: (580, 650),
+            min_size: Some((560, 650)),
             resizable: true,
             decorations: true,
             ..Default::default()
@@ -323,7 +323,7 @@ impl Application for ImageResizer {
             ].spacing(0)
         )
         .width(Length::Fill)
-        .padding(8)
+        .padding(12)
         .style(theme::Container::Custom(Box::new(CardContainer)));
 
         // Compression mode selection with visual tabs
@@ -341,7 +341,7 @@ impl Application for ImageResizer {
             ].spacing(0)
         )
         .width(Length::Fill)
-        .padding(8)
+        .padding(12)
         .style(theme::Container::Custom(Box::new(CardContainer)));
 
         // Compression settings card
@@ -359,7 +359,7 @@ impl Application for ImageResizer {
                     ].spacing(0)
                 )
                 .width(Length::Fill)
-                .padding(8)
+                .padding(12)
                 .style(theme::Container::Custom(Box::new(CardContainer)))
             }
             CompressionMode::Advanced => {
@@ -427,7 +427,7 @@ impl Application for ImageResizer {
                     ].spacing(0)
                 )
                 .width(Length::Fill)
-                .padding(8)
+                .padding(12)
                 .style(theme::Container::Custom(Box::new(CardContainer)))
             }
         };
@@ -444,10 +444,10 @@ impl Application for ImageResizer {
                         .size(14)
                         .font(BODY_FONT)
                         .style(Color::from_rgb(0.3, 0.3, 0.4))
-                        .width(100),
+                        .width(96),
                     text_input("Optional (KB)", &self.target_size)
                         .on_input(Message::TargetSizeChanged)
-                        .width(Length::Fill)
+                        .width(Length::Fixed(188.0))
                         .padding([8, 12])
                         .size(14),
                 ].spacing(12).align_items(iced::Alignment::Center),
@@ -486,7 +486,7 @@ impl Application for ImageResizer {
             ].spacing(0)
         )
         .width(Length::Fill)
-        .padding(8)
+        .padding(12)
         .style(theme::Container::Custom(Box::new(CardContainer)));
 
         // Process button and progress
@@ -603,7 +603,7 @@ impl Application for ImageResizer {
                 )
                 .max_width(680)
                 .center_x()
-                .padding([20, 16, 0, 16])
+                .padding([6, 14, 6, 6])
             ].spacing(0)
         );
 
@@ -622,7 +622,7 @@ impl Application for ImageResizer {
 // Helper UI functions
 fn icon_text(icon: &str, label: &str, icon_size: u16, text_size: u16) -> Element<'static, Message> {
     row![
-        text(icon).size(icon_size),
+        //text(icon).size(icon_size),
         text(label)
             .size(text_size)
             .font(HEADING_FONT)
@@ -654,17 +654,17 @@ fn mode_button(title: &str, subtitle: &str, mode: CompressionMode, current: Comp
     button(
         column![
             text(title)
-                .size(15)
+                .size(12)
                 .font(HEADING_FONT)
                 .style(if is_selected { PRIMARY_COLOR } else { Color::from_rgb(0.4, 0.4, 0.5) }),
             text(subtitle)
-                .size(12)
+                .size(8)
                 .font(LIGHT_FONT)
-                .style(if is_selected { PRIMARY_COLOR } else { Color::from_rgb(0.6, 0.6, 0.7) }),
+                .style(if is_selected { PRIMARY_COLOR } else { Color::from_rgb(0.6, 0.6, 0.5) }),
         ].spacing(2).align_items(iced::Alignment::Center)
     )
     .on_press(Message::ModeChanged(mode))
-    .padding([12, 24])
+    .padding([8, 16])
     .style(if is_selected {
         theme::Button::Primary
     } else {
