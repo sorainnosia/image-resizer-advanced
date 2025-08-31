@@ -530,11 +530,7 @@ impl Application for ImageResizer {
                 
                 container(
                     row![
-                        text(icon)
-                            .size(16)
-                            .font(HEADING_FONT)
-                            .style(color)
-                            .width(30),
+                      
                         text(&result.filename)
                             .size(13)
                             .font(BODY_FONT)
